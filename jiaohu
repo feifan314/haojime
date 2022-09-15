@@ -1,0 +1,982 @@
+package jiaohu
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"gopkg.in/ini.v1"
+	"io"
+	"io/ioutil"
+	"log"
+	"math/big"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+//sdk "github.com/tendermint/tendermint/jiaohu/types"
+//sdktx "github.com/tendermint/tendermint/jiaohu/types/tx"
+
+//import (
+//	"encoding/hex"
+//	"fmt"
+//	"github.com/tendermint/tendermint/jiaohu/secp256k1"
+//	sdk "github.com/tendermint/tendermint/jiaohu/types"
+//	sdktx "github.com/tendermint/tendermint/jiaohu/types/tx"
+//	signingtypes "github.com/tendermint/tendermint/jiaohu/types/tx/signing"
+//	authsigning "github.com/tendermint/tendermint/jiaohu/x/auth/signing"
+//	"gopkg.in/ini.v1"
+//	"math/big"
+//	"strconv"
+//	"strings"
+//	"time"
+//)
+
+import "sync"
+
+//交互tx字节 读写安全 因为别的地方有锁
+
+var DongUstUsdt float64
+
+func GetUstUsdt() float64 {
+	if SheZhi.UstUsdt == 0.9999 {
+		return DongUstUsdt
+	}
+	return SheZhi.UstUsdt
+}
+
+var QuanTxByte []byte
+
+var ZuiTxt string
+
+var jiaohuilog *log.Logger
+var LogFileMy *os.File
+
+func init() {
+	fileMy := "/root/xinyong.txt"
+	os.Rename(fileMy, fmt.Sprintf("/root/xin%s.txt", time.Now().Format("2006-01-02 15:04:05")))
+	var errcba error
+	LogFileMy, errcba = os.OpenFile(fileMy, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
+	if nil != errcba {
+		panic(errcba)
+	}
+	//defer logFileMy.Close()
+	jiaohuilog = log.New(LogFileMy, "", log.Ldate|log.Ltime) //|log.Lshortfile
+	mw := io.MultiWriter(os.Stdout, LogFileMy)
+	jiaohuilog.SetOutput(mw)
+	jiaohuilog.Println("[交互]------开启日志")
+}
+
+//func GetByte() []byte {
+//	return QuanTxByte
+//}
+//
+//func SetByte(zhiru []byte) {
+//	QuanTxByte = zhiru
+//}
+
+type UstLuna struct {
+	ZhuUst  int64
+	ZhuLuna int64
+	SiUst   int64
+	SiLuna  int64
+}
+
+var YuUstLuna UstLuna
+var YuLock sync.RWMutex
+
+func SetYu(ZhuUst, ZhuLuna, SiUst, SiLuna int64) {
+	YuLock.Lock()
+	YuUstLuna.ZhuUst = ZhuUst
+	YuUstLuna.ZhuLuna = ZhuLuna
+	YuUstLuna.SiUst = SiUst
+	YuUstLuna.SiLuna = SiLuna
+	YuLock.Unlock()
+}
+
+func SetYuSi(SiUst, SiLuna int64) {
+	YuLock.Lock()
+	YuUstLuna.SiUst = SiUst
+	YuUstLuna.SiLuna = SiLuna
+	YuLock.Unlock()
+}
+
+func AddSiUst(SiUst int64) {
+	YuLock.Lock()
+	YuUstLuna.SiUst += SiUst
+	YuLock.Unlock()
+}
+func AddSiLuna(SiLuna int64) {
+	YuLock.Lock()
+	YuUstLuna.SiLuna += SiLuna
+	YuLock.Unlock()
+}
+
+func SubZhuUst(ZhuUst int64) {
+	YuLock.Lock()
+	YuUstLuna.ZhuUst -= ZhuUst
+	YuLock.Unlock()
+}
+func SubZhuLuna(ZhuLuna int64) {
+	YuLock.Lock()
+	YuUstLuna.ZhuLuna -= ZhuLuna
+	YuLock.Unlock()
+}
+func SubSiUst(SiUst int64) {
+	YuLock.Lock()
+	YuUstLuna.SiUst -= SiUst
+	YuLock.Unlock()
+}
+func SubSiLuna(SiLuna int64) {
+	YuLock.Lock()
+	YuUstLuna.SiLuna -= SiLuna
+	YuLock.Unlock()
+}
+
+func GetYuSi() (int64, int64, bool) {
+	YuLock.RLock()
+	defer YuLock.RUnlock()
+	if YuUstLuna.SiUst > 1000000 && YuUstLuna.SiLuna > 1000000 {
+		return YuUstLuna.SiUst, YuUstLuna.SiLuna, true
+	}
+	return 0, 0, false
+}
+
+type HashTime struct {
+	Hash string
+	Old  int64
+	Txt  string
+
+	FaSong int //是否发送给网页
+}
+
+var ListHash []HashTime
+var HashTimeLock sync.RWMutex
+
+func SetHashTime(hash string, lei int) {
+	HashTimeLock.Lock()
+	defer HashTimeLock.Unlock()
+	for _, linshi := range ListHash {
+		if linshi.Hash == hash {
+			fmt.Println("相同hash-不在加入", hash)
+			return
+		}
+	}
+
+	ListHash = append(ListHash, HashTime{hash, time.Now().UnixNano(), ZuiTxt, lei}) //加入到最后
+	ZuiTxt = ""                                                                     //使用后重置
+}
+
+func SetFaSong(hash string, lei int) {
+	HashTimeLock.Lock()
+	if len(ListHash) > 0 {
+		if ListHash[0].Hash == hash {
+			ListHash[0].FaSong = lei
+		}
+	}
+	HashTimeLock.Unlock()
+}
+
+func GetHashTime() (int, string, int64, string, int) { //数量 hash 时间
+	HashTimeLock.RLock()
+	defer HashTimeLock.RUnlock()
+	if len(ListHash) == 0 {
+		return 0, "", 0, "", 1
+	}
+	return len(ListHash), ListHash[0].Hash, ListHash[0].Old, ListHash[0].Txt, ListHash[0].FaSong
+}
+
+func GetHashTimeLen() int { //还有多少待处理
+	HashTimeLock.RLock()
+	defer HashTimeLock.RUnlock()
+	return len(ListHash)
+}
+
+func DeleteHashTime(hash string, OutTime int64) { //万次 设置 获取 删除共 0.613毫秒 几乎无开销
+	HashTimeLock.Lock()
+	defer HashTimeLock.Unlock()
+	if len(hash) == 64 { //设置hash优先删除
+		for index, LinHashTime := range ListHash {
+			if LinHashTime.Hash == hash {
+				ListHash = append(ListHash[:index], ListHash[index+1:]...)
+				fmt.Println("删除[交易列表]-hash")
+				return //只删除一次
+			}
+		}
+	}
+	//要删除 外边获取到的 hash 或者 时间
+	for index, LinHashTime := range ListHash { // 先找到设置的时间
+		if LinHashTime.Old == OutTime { //外边定义的时间
+			ListHash = append(ListHash[:index], ListHash[index+1:]...)
+			fmt.Println("删除[交易列表]-time相同")
+			return //只删除一次
+		}
+	}
+
+	for index, LinHashTime := range ListHash { //没办法 只能删除超时的
+		if (time.Now().UnixNano()-LinHashTime.Old)/1e9 >= 30 {
+			ListHash = append(ListHash[:index], ListHash[index+1:]...)
+			fmt.Println("删除[交易列表]-毫秒>30")
+			return //只删除一次
+		}
+	}
+
+}
+
+func getzhongjian(str, start, end string) string { //xiugai
+	n := strings.Index(str, start)
+	if n == -1 {
+		return ""
+	}
+	n += len(start)
+	str = string([]byte(str)[n:])
+	m := strings.Index(str, end)
+	if m == -1 {
+		return ""
+	}
+	str = string([]byte(str)[:m])
+	if len(str) <= 0 { //个别交易段注意
+		return ""
+	}
+	return str
+}
+
+var BiAnLock sync.RWMutex
+var BiAnHong [5]float64
+var BiAnLv [5]float64
+var BiAnTime int64
+
+var TeZheng = "T"
+
+//func XieBiAn(biAnHongZuiDi [5]float64, biAnLvZuiGao [5]float64) {
+//	BiAnLock.Lock()
+//	BiAnHong = biAnHongZuiDi
+//	BiAnLv = biAnLvZuiGao
+//	BiAnTime = time.Now().UnixNano()
+//	BiAnLock.Unlock()
+//}
+
+func XieBiAn(biAnHongZuiDi [5]float64, biAnLvZuiGao [5]float64) (bool, int) {
+	BiAnLock.Lock()
+	BiAnHong = biAnHongZuiDi
+	BiAnLv = biAnLvZuiGao
+	BiAnTime = time.Now().UnixNano()
+	BiAnLock.Unlock()
+	if UpSheZhi {
+		return true, YunXing
+	}
+	return false, YunXing
+}
+
+func XieBiAntime() {
+	BiAnLock.Lock()
+	BiAnTime = time.Now().UnixNano() - 60*1000000000 //提前60秒
+	BiAnLock.Unlock()
+}
+
+func DuBiAn() ([5]float64, [5]float64, int64) {
+	BiAnLock.RLock()
+	defer BiAnLock.RUnlock()
+	JianGe := (time.Now().UnixNano() - BiAnTime) / 1e6 //1e6 = 1000000
+	//if SheZhi.UstUsdt <= 0.0001 {
+	//	JianGe = 8888.0 //暂未读取配置
+	//}
+	return BiAnHong, BiAnLv, JianGe
+}
+
+func UstVsLuna(amountOut, reserveIn, reserveOut int64) int64 {
+	//每次要扣除0.003 我多换0.003
+	amountOut = int64(float64(amountOut) / 0.997)
+	bigAmountOut := big.NewInt(amountOut)
+	bigReserveIn := big.NewInt(reserveIn)
+	bigReserveOut := big.NewInt(reserveOut)
+	numerator := new(big.Int).Mul(bigReserveIn, bigAmountOut)
+	denominator := new(big.Int).Sub(bigReserveOut, bigAmountOut)
+	amountIn := new(big.Int).Div(numerator, denominator)
+	return amountIn.Int64() + 1
+}
+
+func InOut(amountIn, reserveIn, reserveOut int64) (int64, int64) { //func suan(inn, in, out float64) float64 {
+	bigAmountIn := big.NewInt(amountIn)
+	bigReserveIn := big.NewInt(reserveIn)
+	bigReserveOut := big.NewInt(reserveOut)
+	fenzi := new(big.Int).Mul(bigAmountIn, bigReserveOut)
+	fenmu := new(big.Int).Add(bigReserveIn, bigAmountIn)
+	//fmt.Println(new(big.Int).Div(fenzi, fenmu).Int64()) 有偏差
+	amountOut := float64(new(big.Int).Div(fenzi, fenmu).Int64())
+	yiFee := int64(float64(int64(amountOut*0.003)) * 0.3333)
+	jiujiuqiFee := int64(amountOut*0.997) + 1
+	return jiujiuqiFee, yiFee
+}
+
+func FloatRound(f float64, n int) float64 {
+	format := "%." + strconv.Itoa(n) + "f"
+	res, _ := strconv.ParseFloat(fmt.Sprintf(format, f), 64)
+	return res
+}
+
+var ZuiHouHeight int64
+
+func JiSuanPrice(linUusd int64, linUluna int64, JiaoAmount float64, buyLiRun float64, sellLiRun float64) (float64, float64, float64, float64) {
+	ustUsdt := GetUstUsdt()
+	if JiaoAmount == 0.0 || buyLiRun == 0.0 || sellLiRun == 0.0 {
+		JiaoAmount = SheZhi.SwapAmountA
+		buyLiRun = SheZhi.BuyLiRunA
+		sellLiRun = SheZhi.SellLiRunA
+	}
+	//ust->luna 需要N个ust换JiaoAmount个luna
+	JiaoAmount = JiaoAmount * 1000000.0
+	needUst := UstVsLuna(int64(JiaoAmount), linUusd, linUluna)
+	buyUlunaPrice := float64(needUst) / JiaoAmount
+
+	//buyUlunaPrice := linUusd / (linUluna * (1.0 - JiaoAmount)) // 买Luna 扣除 uusd
+
+	jbBuyUlunaPrice := buyUlunaPrice * ustUsdt * buyLiRun // 警报
+	buyUlunaPrice = FloatRound(buyUlunaPrice, 8)          //精度3
+	jbBuyUlunaPrice = FloatRound(jbBuyUlunaPrice, 8)      //精度2
+
+	//luna-> ust JiaoAmount个luna换ust
+	returnUst, _ := InOut(int64(JiaoAmount), linUluna, linUusd)
+	sellLunaPrice := float64(returnUst) / JiaoAmount
+
+	//sellLunaPrice := (linUusd * (1.0 - JiaoAmount)) / linUluna // 卖luna 扣除 Luna
+
+	jbSellUlunaPrice := sellLunaPrice * ustUsdt / sellLiRun // 警报
+	sellLunaPrice = FloatRound(sellLunaPrice, 8)            //精度3
+	jbSellUlunaPrice = FloatRound(jbSellUlunaPrice, 8)      //精度2
+	return buyUlunaPrice, sellLunaPrice, jbBuyUlunaPrice, jbSellUlunaPrice
+}
+
+type SheZhiLei struct {
+	ApiKey    string //新添
+	SecretKey string //新添
+	FanXiang  string //新添
+	UstUsdt   float64
+	JianGe    float64
+	Gas       float64
+	FeeUst    float64
+
+	BuyLiRunA   float64
+	SellLiRunA  float64
+	SwapAmountA float64
+	HuaDianA    float64
+
+	BuyLiRunB   float64
+	SellLiRunB  float64
+	SwapAmountB float64
+	HuaDianB    float64
+
+	BuyLiRunC   float64
+	SellLiRunC  float64
+	SwapAmountC float64
+	HuaDianC    float64
+
+	BuyLiRunD   float64
+	SellLiRunD  float64
+	SwapAmountD float64
+	HuaDianD    float64
+
+	BuyLiRunE   float64 //新添
+	SellLiRunE  float64 //新添
+	SwapAmountE float64 //新添
+	HuaDianE    float64
+}
+
+var SheZhi SheZhiLei
+
+var YunXing int
+
+var UpSheZhi bool
+
+func XieRuToml(linwang string) bool {
+	fmt.Println("读取到配置", linwang[11:len(linwang)-2])
+	countSplit := strings.Split(linwang[11:len(linwang)-2], " ")
+	if len(countSplit) == 27 {
+		cfg, err := ini.Load("/root/luna38.ini")
+		if err != nil {
+			fmt.Println("无法读入/root/luna38.ini")
+			return false
+		}
+		cfg.Section("she").Key("ApiKey").SetValue(countSplit[0])
+		cfg.Section("she").Key("SecretKey").SetValue(countSplit[1])
+		cfg.Section("she").Key("FanXiang").SetValue(countSplit[2])
+
+		cfg.Section("she").Key("UstUsdt").SetValue(countSplit[3])
+		cfg.Section("she").Key("JianGe").SetValue(countSplit[4])
+		cfg.Section("she").Key("Gas").SetValue(countSplit[5])
+		cfg.Section("she").Key("FeeUst").SetValue(countSplit[6])
+
+		cfg.Section("she").Key("BuyLiRunA").SetValue(countSplit[7])
+		cfg.Section("she").Key("SellLiRunA").SetValue(countSplit[8])
+		cfg.Section("she").Key("SwapAmountA").SetValue(countSplit[9])
+		cfg.Section("she").Key("HuaDianA").SetValue(countSplit[10])
+
+		cfg.Section("she").Key("BuyLiRunB").SetValue(countSplit[11])
+		cfg.Section("she").Key("SellLiRunB").SetValue(countSplit[12])
+		cfg.Section("she").Key("SwapAmountB").SetValue(countSplit[13])
+		cfg.Section("she").Key("HuaDianB").SetValue(countSplit[14])
+
+		cfg.Section("she").Key("BuyLiRunC").SetValue(countSplit[15])
+		cfg.Section("she").Key("SellLiRunC").SetValue(countSplit[16])
+		cfg.Section("she").Key("SwapAmountC").SetValue(countSplit[17])
+		cfg.Section("she").Key("HuaDianC").SetValue(countSplit[18])
+
+		cfg.Section("she").Key("BuyLiRunD").SetValue(countSplit[19])
+		cfg.Section("she").Key("SellLiRunD").SetValue(countSplit[20])
+		cfg.Section("she").Key("SwapAmountD").SetValue(countSplit[21])
+		cfg.Section("she").Key("HuaDianD").SetValue(countSplit[22])
+
+		cfg.Section("she").Key("BuyLiRunE").SetValue(countSplit[23])
+		cfg.Section("she").Key("SellLiRunE").SetValue(countSplit[24])
+		cfg.Section("she").Key("SwapAmountE").SetValue(countSplit[25])
+		cfg.Section("she").Key("HuaDianE").SetValue(countSplit[26])
+
+		cfg.SaveTo("/root/luna38.ini")
+		return true
+	}
+	return false
+}
+
+func DuRuToml() {
+	cfg, err := ini.Load("/root/luna38.ini")
+	if err != nil {
+		fmt.Println("打开[配置失败]-[停止交易] 运行 = 关闭")
+		YunXing = 0
+		return
+	}
+
+	ZhuanType := func(MingZi string) float64 {
+		linTxt := cfg.Section("she").Key(MingZi[4:]).String()
+		if len(linTxt) == 0 {
+			fmt.Println("读取[配置失败]-[停止交易] 运行 = 关闭", "名字", MingZi)
+			YunXing = 0
+			return 1.0
+		}
+		fanFloat, errs := strconv.ParseFloat(linTxt, 64)
+		if errs != nil {
+			fmt.Println("读取[配置失败]-[停止交易] 运行 = 关闭", "名字", MingZi)
+			YunXing = 0
+			return 1.0
+		}
+		if fanFloat <= 0 {
+			fmt.Println("读取[配置失败]-[停止交易] 运行 = 关闭", "名字", MingZi, "值", fanFloat)
+			YunXing = 0
+			return 1.0
+		}
+		return fanFloat
+	}
+	ZhuanTypeString := func(MingZi string) string {
+		linTxt := cfg.Section("she").Key(MingZi[4:]).String()
+		if len(linTxt) == 0 {
+			fmt.Println("读取[配置失败]-[停止交易] 运行 = 关闭", "名字", MingZi)
+			YunXing = 0
+			return ""
+		}
+		return linTxt
+	}
+	SheZhi.ApiKey = ZhuanTypeString("she.ApiKey")
+	SheZhi.SecretKey = ZhuanTypeString("she.SecretKey")
+	SheZhi.FanXiang = ZhuanTypeString("she.FanXiang")
+
+	SheZhi.UstUsdt = ZhuanType("she.UstUsdt")
+	SheZhi.JianGe = ZhuanType("she.JianGe")
+	SheZhi.Gas = ZhuanType("she.Gas")
+	SheZhi.FeeUst = ZhuanType("she.FeeUst")
+
+	SheZhi.BuyLiRunA = ZhuanType("she.BuyLiRunA")
+	SheZhi.SellLiRunA = ZhuanType("she.SellLiRunA")
+	SheZhi.SwapAmountA = ZhuanType("she.SwapAmountA")
+	SheZhi.HuaDianA = ZhuanType("she.HuaDianA")
+
+	SheZhi.BuyLiRunB = ZhuanType("she.BuyLiRunB")
+	SheZhi.SellLiRunB = ZhuanType("she.SellLiRunB")
+	SheZhi.SwapAmountB = ZhuanType("she.SwapAmountB")
+	SheZhi.HuaDianB = ZhuanType("she.HuaDianB")
+
+	SheZhi.BuyLiRunC = ZhuanType("she.BuyLiRunC")
+	SheZhi.SellLiRunC = ZhuanType("she.SellLiRunC")
+	SheZhi.SwapAmountC = ZhuanType("she.SwapAmountC")
+	SheZhi.HuaDianC = ZhuanType("she.HuaDianC")
+
+	SheZhi.BuyLiRunD = ZhuanType("she.BuyLiRunD")
+	SheZhi.SellLiRunD = ZhuanType("she.SellLiRunD")
+	SheZhi.SwapAmountD = ZhuanType("she.SwapAmountD")
+	SheZhi.HuaDianD = ZhuanType("she.HuaDianD")
+
+	SheZhi.BuyLiRunE = ZhuanType("she.BuyLiRunE")
+	SheZhi.SellLiRunE = ZhuanType("she.SellLiRunE")
+	SheZhi.SwapAmountE = ZhuanType("she.SwapAmountE")
+	SheZhi.HuaDianE = ZhuanType("she.HuaDianE")
+
+	TeZheng = cfg.Section("she").Key("tezheng").String()
+	fmt.Println(TeZheng, "成功读入配置", SheZhi)
+	UpSheZhi = true
+	if SheZhi.FanXiang == "nos" {
+		BinAnUsdt = 999999999.99
+		BinAnLuna = 999999999.99
+	}
+}
+
+var BinAnUsdt float64
+var BinAnLuna float64
+
+var QuanAccLuna float64
+var QuanAccUst float64
+
+var QuanAccountNumber uint64
+var QuanSequence uint64
+var QuanOldSequence uint64
+
+func TiaoJian(Lei int, uusd int64, uluna int64, hongLvZui [5]float64, tongPrice float64) (float64, float64, float64) {
+
+	LingFLuna := QuanAccLuna
+	LingFUst := QuanAccUst
+	JiaoAmount := 0.0
+	HuaDian := 0.0
+	JiaoPrice := 0.0
+	if hongLvZui[0] < 0.0 {
+		fmt.Println("币安交易单价过低", tongPrice)
+		return 0.0, 0.0, 0.0
+	}
+	if hongLvZui[0] >= 9999.0 {
+		fmt.Println("币安交易单价过高", tongPrice)
+		return 0.0, 0.0, 0.0
+	}
+
+	if tongPrice < 0.0 { //单价最低为2
+		fmt.Println("交易单价过低", tongPrice)
+		return 0.0, 0.0, 0.0
+	}
+
+	fs := SheZhi
+	if Lei == 1 { //购买
+		JiaoAmount = fs.SwapAmountA //默认是原始
+		HuaDian = fs.HuaDianA
+		JiaoPrice = hongLvZui[0]
+		xvYaoUst := tongPrice*JiaoAmount*1.005 + fs.FeeUst // 至少多准备1%(滑点)    预备0.2ust手续费
+		if LingFUst < xvYaoUst {
+			//fmt.Println("terra[买入]Ust不足A", "剩余", fmt.Sprintf("%.3f", LingFUst), "需要", fmt.Sprintf("%.3f", xvYaoUst))
+			return 0.0, 0.0, 0.0
+		}
+		if BinAnLuna < JiaoAmount {
+			//fmt.Println("币安[卖出]Luna不足A", "剩余", fmt.Sprintf("%.3f", BinAnLuna), "需要", fmt.Sprintf("%.3f", JiaoAmount))
+			return 0.0, 0.0, 0.0
+		}
+		_, _, JbBuyPriceB, _ := JiSuanPrice(uusd, uluna, fs.SwapAmountB, fs.BuyLiRunB, fs.SellLiRunB)
+		if JbBuyPriceB <= hongLvZui[1] { //terra买53.1  币安绿 币安卖出55.8  币安只要能卖5.1就行
+			xvYaoUst = tongPrice*fs.SwapAmountB*1.005 + fs.FeeUst // 至少多准备1%(滑点)    预备0.2ust手续费
+			if LingFUst < xvYaoUst {
+				//fmt.Println("terra[买入]Ust不足B", "剩余", fmt.Sprintf("%.3f", LingFUst), "需要", fmt.Sprintf("%.3f", xvYaoUst))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			if BinAnLuna < fs.SwapAmountB {
+				//fmt.Println("币安[卖出]Luna不足B", "剩余", fmt.Sprintf("%.3f", BinAnLuna), "需要", fmt.Sprintf("%.3f", fs.SwapAmountB))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			JiaoAmount = fs.SwapAmountB
+			HuaDian = fs.HuaDianB
+			//JiaoPrice = hongLvZui[1]
+			JiaoPrice = JbBuyPriceB
+		}
+		_, _, JbBuyPriceC, _ := JiSuanPrice(uusd, uluna, fs.SwapAmountC, fs.BuyLiRunC, fs.SellLiRunC)
+		if JbBuyPriceC <= hongLvZui[2] {
+			xvYaoUst = tongPrice*fs.SwapAmountC*1.005 + fs.FeeUst // 至少多准备1%(滑点)    预备0.2ust手续费
+			if LingFUst < xvYaoUst {
+				//fmt.Println("terra[买入]Ust不足C", "剩余", fmt.Sprintf("%.3f", LingFUst), "需要", fmt.Sprintf("%.3f", xvYaoUst))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			if BinAnLuna < fs.SwapAmountC {
+				//fmt.Println("币安[卖出]Luna不足C", "剩余", fmt.Sprintf("%.3f", BinAnLuna), "需要", fmt.Sprintf("%.3f", fs.SwapAmountC))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			JiaoAmount = fs.SwapAmountC
+			HuaDian = fs.HuaDianC
+			//JiaoPrice = hongLvZui[2]
+			JiaoPrice = JbBuyPriceC
+		}
+		_, _, JbBuyPriceD, _ := JiSuanPrice(uusd, uluna, fs.SwapAmountD, fs.BuyLiRunD, fs.SellLiRunD)
+		if JbBuyPriceD <= hongLvZui[3] {
+			xvYaoUst = tongPrice*fs.SwapAmountD*1.005 + fs.FeeUst // 至少多准备1%(滑点)    预备0.2ust手续费
+			if LingFUst < xvYaoUst {
+				//fmt.Println("terra[买入]Ust不足D", "剩余", fmt.Sprintf("%.3f", LingFUst), "需要", fmt.Sprintf("%.3f", xvYaoUst))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			if BinAnLuna < fs.SwapAmountD {
+				//fmt.Println("币安[卖出]Luna不足D", "剩余", fmt.Sprintf("%.3f", BinAnLuna), "需要", fmt.Sprintf("%.3f", fs.SwapAmountD))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			JiaoAmount = fs.SwapAmountD
+			HuaDian = fs.HuaDianD
+			//JiaoPrice = hongLvZui[3]
+			JiaoPrice = JbBuyPriceD
+		}
+
+		_, _, JbBuyPriceE, _ := JiSuanPrice(uusd, uluna, fs.SwapAmountE, fs.BuyLiRunE, fs.SellLiRunE)
+		if JbBuyPriceE <= hongLvZui[4] {
+			xvYaoUst = tongPrice*fs.SwapAmountE*1.005 + fs.FeeUst // 至少多准备1%(滑点)    预备0.2ust手续费
+			if LingFUst < xvYaoUst {
+				//fmt.Println("terra[买入]Ust不足E", "剩余", fmt.Sprintf("%.3f", LingFUst), "需要", fmt.Sprintf("%.3f", xvYaoUst))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			if BinAnLuna < fs.SwapAmountE {
+				//fmt.Println("币安[卖出]Luna不足E", "剩余", fmt.Sprintf("%.3f", BinAnLuna), "需要", fmt.Sprintf("%.3f", fs.SwapAmountE))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			JiaoAmount = fs.SwapAmountE
+			HuaDian = fs.HuaDianE
+			//JiaoPrice = hongLvZui[4]
+			JiaoPrice = JbBuyPriceE
+		}
+
+	} else if Lei == 2 { //出售
+		JiaoAmount = fs.SwapAmountA //默认是原始
+		HuaDian = fs.HuaDianA
+		JiaoPrice = hongLvZui[0]
+
+		xvYaoLuna := JiaoAmount // + fs.FeeLuna // 交易数量+手续费用
+		if LingFLuna < xvYaoLuna {
+			//fmt.Println("terra[卖出]Luna不足A", "剩余", fmt.Sprintf("%.3f", LingFLuna), "需要", fmt.Sprintf("%.3f", xvYaoLuna))
+			return 0.0, 0.0, 0.0
+		}
+		if BinAnUsdt < JiaoAmount*JiaoPrice*1.1 { //我会提高10%
+			//fmt.Println("币安[买入]Usdt不足A", "剩余", fmt.Sprintf("%.3f", BinAnUsdt), "需要", fmt.Sprintf("%.3f", JiaoAmount*JiaoPrice*1.1))
+			return 0.0, 0.0, 0.0
+		}
+		_, _, _, JbSellPriceB := JiSuanPrice(uusd, uluna, fs.SwapAmountB, fs.BuyLiRunB, fs.SellLiRunB)
+		if JbSellPriceB >= hongLvZui[1] {
+			xvYaoLuna = fs.SwapAmountB // + fs.FeeLuna // 交易数量+手续费用
+			if LingFLuna < xvYaoLuna {
+				//fmt.Println("terra[卖出]Luna不足B", "剩余", fmt.Sprintf("%.3f", LingFLuna), "需要", fmt.Sprintf("%.3f", xvYaoLuna))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			if BinAnUsdt < fs.SwapAmountB*hongLvZui[1]*1.1 { //我会提高10%
+				//fmt.Println("币安[买入]Usdt不足B", "剩余", fmt.Sprintf("%.3f", BinAnUsdt), "需要", fmt.Sprintf("%.3f", fs.SwapAmountB*hongLvZui[1]*1.1))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			JiaoAmount = fs.SwapAmountB
+			HuaDian = fs.HuaDianB
+			//JiaoPrice = hongLvZui[1]
+			JiaoPrice = JbSellPriceB
+		}
+		_, _, _, JbSellPriceC := JiSuanPrice(uusd, uluna, fs.SwapAmountC, fs.BuyLiRunC, fs.SellLiRunC)
+		if JbSellPriceC >= hongLvZui[2] {
+			xvYaoLuna = fs.SwapAmountC // + fs.FeeLuna // 交易数量+手续费用
+			if LingFLuna < xvYaoLuna {
+				//fmt.Println("terra[卖出]Luna不足C", "剩余", fmt.Sprintf("%.3f", LingFLuna), "需要", fmt.Sprintf("%.3f", xvYaoLuna))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			if BinAnUsdt < fs.SwapAmountC*hongLvZui[2]*1.1 { //我会提高10%
+				//fmt.Println("币安[买入]Usdt不足C", "剩余", fmt.Sprintf("%.3f", BinAnUsdt), "需要", fmt.Sprintf("%.3f", fs.SwapAmountC*hongLvZui[2]*1.1))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			JiaoAmount = fs.SwapAmountC
+			HuaDian = fs.HuaDianC
+			//JiaoPrice = hongLvZui[2]
+			JiaoPrice = JbSellPriceC
+		}
+		_, _, _, JbSellPriceD := JiSuanPrice(uusd, uluna, fs.SwapAmountD, fs.BuyLiRunD, fs.SellLiRunD)
+		if JbSellPriceD >= hongLvZui[3] {
+			xvYaoLuna = fs.SwapAmountD // + fs.FeeLuna // 交易数量+手续费用
+			if LingFLuna < xvYaoLuna {
+				//fmt.Println("terra[卖出]Luna不足D", "剩余", fmt.Sprintf("%.3f", LingFLuna), "需要", fmt.Sprintf("%.3f", xvYaoLuna))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			if BinAnUsdt < fs.SwapAmountD*hongLvZui[3]*1.1 { //我会提高10%
+				//fmt.Println("币安[买入]Usdt不足D", "剩余", fmt.Sprintf("%.3f", BinAnUsdt), "需要", fmt.Sprintf("%.3f", fs.SwapAmountD*hongLvZui[3]*1.1))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			JiaoAmount = fs.SwapAmountD
+			HuaDian = fs.HuaDianD
+			//JiaoPrice = hongLvZui[3]
+			JiaoPrice = JbSellPriceD
+		}
+
+		_, _, _, JbSellPriceE := JiSuanPrice(uusd, uluna, fs.SwapAmountE, fs.BuyLiRunE, fs.SellLiRunE)
+		if JbSellPriceE >= hongLvZui[4] {
+			xvYaoLuna = fs.SwapAmountE // + fs.FeeLuna // 交易数量+手续费用
+			if LingFLuna < xvYaoLuna {
+				//fmt.Println("terra[卖出]Luna不足E", "剩余", fmt.Sprintf("%.3f", LingFLuna), "需要", fmt.Sprintf("%.3f", xvYaoLuna))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			if BinAnUsdt < fs.SwapAmountE*hongLvZui[4]*1.1 { //我会提高10%
+				//fmt.Println("币安[买入]Usdt不足E", "剩余", fmt.Sprintf("%.3f", BinAnUsdt), "需要", fmt.Sprintf("%.3f", fs.SwapAmountE*hongLvZui[4]*1.1))
+				return JiaoAmount, JiaoPrice, HuaDian //还设置上次数量
+			}
+			JiaoAmount = fs.SwapAmountE
+			HuaDian = fs.HuaDianE
+			//JiaoPrice = hongLvZui[4]
+			JiaoPrice = JbSellPriceE
+		}
+	}
+	if JiaoAmount <= 0 { //数量
+		fmt.Println("交易数量过低", JiaoAmount)
+		return 0.0, 0.0, 0.0
+	}
+	return JiaoAmount, JiaoPrice, HuaDian
+}
+
+var gas = uint64(261000)
+var intAmountFee = int64(39150) //0.03915
+
+//func GetTxByteZhen(sequence uint64, newHeight int64, huaDian float64, denomSwap string, amountSwap float64, priceSwap float64) ([]byte, bool) {
+//	zengjia := false
+//	//return []byte{}, zengjia //严重错误
+//	if QuanOldSequence == sequence {
+//		if newHeight-ZuiHouHeight <= 2 { //现在区块105  最后发送103 修改nonce为 11
+//			sequence = sequence + 1
+//			zengjia = true
+//			fmt.Println("增加sequence新", sequence)
+//		}
+//	}
+//	intAmountSwap := int64(amountSwap * 1000000.0) //数量要乘以1e6 不加.0会损失精度
+//
+//	//sendCoins := sdk.Coins{sdk.NewInt64Coin("uusd", 10000)}
+//	sendCoins := sdk.Coins{sdk.NewInt64Coin(denomSwap, intAmountSwap)} //coins 发送给合约金币
+//
+//	//executemsg := "{\"swap\": {\"max_spread\": \"0.1\", \"offer_asset\": {\"info\": {\"native_token\": {\"denom\": \"uusd\"}}, \"amount\": \"10000\"}, \"belief_price\": \"62.2\"}}"
+//	exeCutemsg := fmt.Sprintf("{\"swap\": {\"max_spread\": \"%.4f\", \"offer_asset\": {\"info\": {\"native_token\": {\"denom\": \"%s\"}}, \"amount\": \"%d\"}, \"belief_price\": \"%.6f\"}}",
+//		huaDian, denomSwap, intAmountSwap, priceSwap)
+//
+//	//xiugai9
+//	//fmt.Println(exeCutemsg)
+//	msg := sdktx.Xin_NewMsgExecuteContract("terra13av2nsaswaltuzrjra48akw7vx3xp08qjl7v7g", "terra1m6ywlgn6wrjuagcmmezzz2a029gtldhey5k552", []byte(exeCutemsg), sendCoins)
+//
+//	txBuilder := encCfg.TxConfig.NewTxBuilder()                               //1000纳秒 1微妙
+//	txBuilder.SetFeeAmount(sdk.Coins{sdk.NewInt64Coin("uusd", intAmountFee)}) //uusd 150000(0.15) uluna 11330(0.01133)
+//	txBuilder.SetGasLimit(gas)                                                //gasLimitFee 500000
+//	linTeZheng := "K" + fmt.Sprintf("%d", newHeight)[4:]
+//	//linTeZheng = "T"
+//
+//	txBuilder.SetMemo(linTeZheng)
+//	err := txBuilder.SetMsgs(msg) //30000纳秒 30微妙
+//	if err != nil {
+//		fmt.Println("FFFFFF msg信息错误", "SetMsgs	", err.Error())
+//		return []byte{}, zengjia
+//	}
+//	overHeight := uint64(newHeight + 3)
+//	txBuilder.SetTimeoutHeight(overHeight)                                                                          //400001 会在400002打包 最多等到400005
+//	sigV2, err := SignWithPrivKeyZi(sequence, overHeight, linTeZheng, huaDian, denomSwap, intAmountSwap, priceSwap) //49980纳秒 50微妙 速度极致
+//	if err != nil {
+//		fmt.Println("FFFFFF 加密错误", "SignWithPrivKey  ", err.Error())
+//		return []byte{}, zengjia
+//	}
+//	err = txBuilder.SetSignatures(sigV2) //5600纳秒 5.6微妙
+//	if err != nil {
+//		fmt.Println("FFFFFF 签名失败", "SetSignatures  ", err.Error())
+//		return []byte{}, zengjia
+//	}
+//	txBytes, err := encCfg.TxConfig.TxEncoder()(txBuilder.GetTx()) //Tx编码器 7280纳秒 7微妙
+//	if err != nil {
+//		fmt.Println("FFFFFF 签名失败", "TxEncoder  ", err.Error())
+//		return []byte{}, zengjia
+//	}
+//	//fmt.Println("FFFFFF tx64字节文本", "文本", base64.StdEncoding.EncodeToString(txBytes), "len", len(txBytes))
+//	//if len(txBytes) == 481 {
+//	//	if base64.StdEncoding.EncodeToString(txBytes) == "CrMCCqkCCiYvdGVycmEud2FzbS52MWJldGExLk1zZ0V4ZWN1dGVDb250cmFjdBL+AQosdGVycmExdTZ6cGdrcmZzMjZuM3J1d3NjOHJtNmFxanR6cTd4cDVyZGtyZGcSLHRlcnJhMW02eXdsZ242d3JqdWFnY21tZXp6ejJhMDI5Z3RsZGhleTVrNTUyGpABeyJzd2FwIjogeyJtYXhfc3ByZWFkIjogIjAuMTAwMCIsICJvZmZlcl9hc3NldCI6IHsiaW5mbyI6IHsibmF0aXZlX3Rva2VuIjogeyJkZW5vbSI6ICJ1dXNkIn19LCAiYW1vdW50IjogIjEwMDAwIn0sICJiZWxpZWZfcHJpY2UiOiAiNjIuMjAwMDAwIn19Kg0KBHV1c2QSBTEwMDAwEgFUGIS1GBJnClAKRgofL2Nvc21vcy5jcnlwdG8uc2VjcDI1NmsxLlB1YktleRIjCiEDpHFy8Zcj8KuGFv9RPlSBHxVvoIBlYdwR9aQjmazGgJkSBAoCCH8YYxITCg0KBHV1c2QSBTM5MTUwEIj3DxpA+ZQD7ppu/p5WAGp7vmyEJZYwARGTCn5D+HuHFpM7GatfMZZXcYlei3RnB6VudzVupHPtRq53UGuJntUKAF3EuA==" {
+//	//		fmt.Println("正确")
+//	//		fmt.Println("正确")
+//	//		fmt.Println("正确")
+//	//	}
+//	//}
+//	ZuiHouHeight = newHeight
+//	QuanOldSequence = sequence
+//	return txBytes, zengjia //xiugai6
+//} //157429 128039 114398
+
+var xinYongSyncMap sync.Map
+
+var xvYaoKanHash sync.Map
+
+func PingGuXinYong(diZhi string, hash string) bool {
+	if diZhi[0:5] != "terra" {
+		//fmt.Println("获取发送地址异常", diZhi)
+		jiaohuilog.Println("获取发送地址异常", diZhi)
+		return true //false
+	}
+	quanZhi, ok := xinYongSyncMap.LoadOrStore(diZhi, 40) //以前有就不覆盖 没有就默认40
+	if ok == true {
+		if quanZhi.(int) <= 0 { //识别为恶意
+			jiaohuilog.Println(diZhi, "恶意地址", quanZhi.(int))
+			return false
+		} else {
+			xvYaoKanHash.Store(hash, diZhi) //先载入 然后有空去识别是否有效
+			jiaohuilog.Println(diZhi, "见过剩余诚信度", quanZhi.(int))
+		}
+	} //else 第一次不管结果
+	return true
+}
+
+func GaiXinYong(hash string, jieGuo int) {
+	//LoadAndDelete 删除键的值，如果有，则返回上一个值。加载的结果报告密钥是否存在。
+	diZhi, ok := xvYaoKanHash.LoadAndDelete(hash) //以前有就不覆盖 没有就默认20
+	if ok == true {
+		if jieGuo == 40 { //交易成功
+			jiaohuilog.Println(diZhi, "恢复信用为40")
+			xinYongSyncMap.Store(diZhi, 40)
+		} else {
+			quanZhi, ok := xinYongSyncMap.Load(diZhi) //以前有就不覆盖
+			if ok == true {
+				jiaohuilog.Println(diZhi, "降低信用为", int(quanZhi.(int)-1))
+
+				xinYongSyncMap.Store(diZhi, int(quanZhi.(int)-1))
+			} else {
+				jiaohuilog.Println("不应该没有xvYaoKanHash->xinYongSyncMap")
+			}
+		}
+	}
+}
+
+var KaiDaiLi = 0 //关闭代理
+//var KaiDaiLi = 1 //开启代理 严重错误
+
+var myHttpclient *http.Client
+
+func init() {
+	myUrli := url.URL{}
+	//myUrlProxy, _ := myUrli.Parse("http://129.226.227.253:3808")
+	myUrlProxy, _ := myUrli.Parse("http://101.32.26.26:3808")
+	myHttpclient = &http.Client{
+		Timeout: time.Second * 6,
+	}
+	if KaiDaiLi == 1 {
+		myHttpclient.Transport = &http.Transport{
+			Proxy: http.ProxyURL(myUrlProxy),
+		}
+	}
+}
+
+func BianSwap(urltxt string, amount string, buysell int) (bool, int64) {
+
+	apiKey := SheZhi.ApiKey
+	if len(apiKey) != 64 {
+		fmt.Println("关闭币安交易A", len(apiKey))
+		return false, 0
+	}
+	secretKey := SheZhi.SecretKey
+	if len(secretKey) != 64 {
+		fmt.Println("关闭币安交易S", len(secretKey))
+		return false, 0
+	}
+	mac := hmac.New(sha256.New, []byte(secretKey))
+	mac.Write([]byte(urltxt))
+	txtSignature := hex.EncodeToString(mac.Sum(nil)) //c8db56825ae71d6d79447849e617115f4a920fa2acdcab2b053c4b2838bd6b71
+
+	urltxt = "https://api.binance.com/api/v3/order?" + urltxt + "&signature=" + txtSignature
+
+	//urltxt = "https://api.binance.com/api/v3/order/test?" + url + "&signature=" + txtSignature
+	//fmt.Println(urltxt)
+	reqest, err := http.NewRequest("POST", urltxt, nil)
+	reqest.Header.Add("X-MBX-APIKEY", apiKey)
+	if err != nil {
+		fmt.Println("HTTP_NewRequest错误", err)
+		return false, 0
+	}
+	//处理返回结果
+	response, err := myHttpclient.Do(reqest)
+	if response != nil {
+		defer response.Body.Close()
+	}
+	if response == nil || err != nil {
+		fmt.Println("HTTP_DO错误", err)
+		return false, 0
+	}
+	data, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		fmt.Println("ReadAll错误", err)
+		return false, 0
+	}
+	//{"symbol":"LUNAUSDT","orderId":1194925733,"orderListId":-1,"clientOrderId":"JJHH33",
+	//"transactTime":1645442626135,"price":"40.10000000","origQty":"0.30000000",
+	//"executedQty":"0.00000000","cummulativeQuoteQty":"0.00000000","status":"EXPIRED","timeInForce":"IOC","type":"LIMIT","side":"BUY","fills":[]}
+	datatxt := string(data)
+	fangTxt := "_bianBUY"
+	if buysell == 1 {
+		fangTxt = "_bianBUY"
+	} else if buysell == 2 {
+		fangTxt = "_bianSELL"
+	} else if buysell == 3 {
+		fangTxt = "_bianBUYust"
+	} else if buysell == 4 {
+		fangTxt = "_bianSELLust"
+	}
+
+	if strings.Contains(datatxt, "\"status\":\"FILLED\"") {
+		fmt.Println("完全成交", datatxt)
+		WangYe(fmt.Sprintf("chengjiao%s|_Shu%s|--%d--", fangTxt, amount, QuanSequence))
+		return true, 1
+	} else if strings.Contains(datatxt, "\"status\":\"NEW\"") {
+		fmt.Println("新建订单", datatxt)
+		WangYe(fmt.Sprintf("shoudong%s|_Shu%s|--%d--", fangTxt, amount, QuanSequence))
+		return true, 2
+	} else if strings.Contains(datatxt, "\"status\":\"EXPIRED\"") {
+		fmt.Println("交易流失", datatxt)
+		WangYe(fmt.Sprintf("shoudong%s|_Shu%s|--%d--", fangTxt, amount, QuanSequence))
+		return true, 9
+	} else if strings.Contains(datatxt, "Account has insufficient balance for requested action.") {
+		fmt.Println("余额不足", datatxt)
+		WangYe(fmt.Sprintf("shoudong%s|_Shu%s|--%d--", fangTxt, amount, QuanSequence))
+		return true, 10
+	} else if strings.Contains(datatxt, "Too many new orders") {
+		fmt.Println("新订单太多", datatxt)
+		WangYe(fmt.Sprintf("shoudong%s|_Shu%s|--%d--", fangTxt, amount, QuanSequence))
+		return true, 99
+	} else if strings.Contains(datatxt, "Duplicate order sent.") {
+		fmt.Println("重复委托", datatxt)
+		WangYe(fmt.Sprintf("shoudong%s|_Shu%s|--%d--", fangTxt, amount, QuanSequence))
+		return true, 8
+	} else {
+		fmt.Println("未知正确结果", datatxt)
+	}
+	WangYe(fmt.Sprintf("shoudong%s|_Shu%s|--%d--", fangTxt, amount, QuanSequence))
+	return true, 0
+}
+
+//var ALiYun = "http://haopingfan.com/0terra/2cun.asp?neirong="
+
+var ALiYun = "http://haojime.com/0terra/1cun.asp?neirong="
+
+func WangYe(neirong string) {
+	httpclient := &http.Client{
+		Timeout: time.Second * 10,
+	}
+	zuhe := ALiYun + neirong
+	httpreq, _ := http.NewRequest("GET", zuhe, nil)
+	httpreq.Header.Set("User-Agent", "mygo")
+	res, err := httpclient.Do(httpreq)
+	if res != nil {
+		defer res.Body.Close()
+	}
+	if res == nil || err != nil {
+		fmt.Println("http请求失败-在发一次", err)
+		resb, err := httpclient.Do(httpreq)
+		if resb != nil {
+			defer resb.Body.Close()
+		}
+		if resb == nil || err != nil {
+			fmt.Println("http请求失败-两次", err)
+		}
+	} else {
+		data, err := ioutil.ReadAll(res.Body) //取出主体的内容
+		if err != nil {
+			fmt.Println("http取出主体的内容失败", err)
+		} else {
+			if string(data) == neirong {
+				fmt.Println("发送[成功]", neirong)
+			} else {
+				fmt.Println("发送[失败]服务器返回:", string(data))
+			}
+		}
+	}
+}
+
+//var QIANGapi *serverapi.Server //xiugai
+//
+//func XXshe(apiSrv *serverapi.Server) {
+//	QIANGapi = apiSrv
+//	fmt.Println("初始ChainID", QIANGapi.ClientCtx.ChainID)
+//	fmt.Println("初始Height", QIANGapi.ClientCtx.Height)
+//}
